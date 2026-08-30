@@ -64,12 +64,19 @@ async function uploadFile(file) {
   const ext = path.extname(file.originalname) || '.html';
   const stem = crypto.randomBytes(8).toString('hex');
   const objectPath = `${Date.now()}-${stem}${ext}`;
+
+  // Always serve HTML with the correct MIME + charset so the browser renders it
+  // instead of displaying the source as text. Browsers submit .html uploads with a
+  // variety of MIME types (text/plain, application/octet-stream, text/html), so we
+  // ignore file.mimetype for .html/.htm and force the right one.
+  const isHtml = /\.html?$/i.test(file.originalname);
+  const contentType = isHtml
+    ? 'text/html; charset=utf-8'
+    : (file.mimetype || 'application/octet-stream');
+
   const { error } = await supabase.storage
     .from(UPLOADS_BUCKET)
-    .upload(objectPath, file.buffer, {
-      contentType: file.mimetype || 'text/html',
-      upsert: false,
-    });
+    .upload(objectPath, file.buffer, { contentType, cacheControl: '3600', upsert: false });
   if (error) throw new Error(`업로드 실패: ${error.message}`);
   const { data } = supabase.storage.from(UPLOADS_BUCKET).getPublicUrl(objectPath);
   return { storagePath: objectPath, publicUrl: data.publicUrl };
