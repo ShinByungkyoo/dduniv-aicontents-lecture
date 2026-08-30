@@ -1,13 +1,11 @@
 import express from 'express';
 import cors from 'cors';
-import multer from 'multer';
 import crypto from 'crypto';
 import path from 'path';
 import { supabase, LECTURES_TABLE, UPLOADS_BUCKET } from '../lib/supabase.js';
-import { issueToken, checkCredentials, requireAuth, verifyToken } from '../lib/auth.js';
+import { issueToken, checkCredentials, requireAuth } from '../lib/auth.js';
 
 const MAX_MATERIALS_PER_LECTURE = 10;
-const MAX_FILE_BYTES = 30 * 1024 * 1024;
 const VALID_SECTIONS = ['1분반', '2분반'];
 
 const ALLOWED_EXT = /\.(html?|pptx?)$/i;
@@ -21,18 +19,8 @@ const isHtml = (name) => /\.html?$/i.test(name);
 
 const app = express();
 app.use(cors());
-app.use(express.json());
-
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_FILE_BYTES, files: MAX_MATERIALS_PER_LECTURE },
-  fileFilter: (_req, file, cb) => {
-    if (!ALLOWED_EXT.test(file.originalname)) {
-      return cb(new Error('HTML 또는 PPT/PPTX 파일만 업로드할 수 있습니다.'));
-    }
-    cb(null, true);
-  },
-});
+// Files go direct to Supabase Storage via signed URLs; POST body is JSON only.
+app.use(express.json({ limit: '1mb' }));
 
 function toRow(dbRow) {
   return {
@@ -71,39 +59,23 @@ async function deleteUnreferencedFiles(materials, referenced) {
   if (error) console.warn('[storage] remove failed:', error.message);
 }
 
-async function uploadFile(file) {
-  const ext = (path.extname(file.originalname) || '').toLowerCase();
-  const stem = crypto.randomBytes(8).toString('hex');
-  const objectPath = `${Date.now()}-${stem}${ext}`;
-
-  const contentType = CONTENT_TYPE_BY_EXT[ext] || file.mimetype || 'application/octet-stream';
-
-  const { error } = await supabase.storage
-    .from(UPLOADS_BUCKET)
-    .upload(objectPath, file.buffer, { contentType, cacheControl: '3600', upsert: false });
-  if (error) throw new Error(`업로드 실패: ${error.message}`);
-
-  // Supabase Storage forces user-uploaded HTML to serve as text/plain (XSS mitigation),
-  // so HTML must be proxied through /api/f/... Other formats (PPT/PPTX) are served
-  // directly from Supabase since Supabase honors their Content-Type correctly.
-  const publicUrl = isHtml(file.originalname)
-    ? `/api/f/${encodeURIComponent(objectPath)}`
-    : supabase.storage.from(UPLOADS_BUCKET).getPublicUrl(objectPath).data.publicUrl;
-
-  return { storagePath: objectPath, publicUrl };
+function publicUrlFor(filename, storagePath) {
+  return isHtml(filename)
+    ? `/api/f/${encodeURIComponent(storagePath)}`
+    : supabase.storage.from(UPLOADS_BUCKET).getPublicUrl(storagePath).data.publicUrl;
 }
 
-async function assembleMaterials(materialsJson, files) {
-  let submitted;
-  try { submitted = JSON.parse(materialsJson || '[]'); }
-  catch { throw new Error('materials JSON 파싱 실패'); }
+// Client-submitted material shapes:
+//   url:  { kind:'url',  label, value }
+//   file: { kind:'file', label, storagePath, originalFilename }  ← uploaded via signed URL first
+//   file (edit, kept):   { kind:'file', label, keep:true, storagePath, value, originalFilename }
+function assembleMaterials(submitted) {
   if (!Array.isArray(submitted)) throw new Error('materials는 배열이어야 합니다.');
   if (submitted.length === 0) throw new Error('최소 하나의 자료가 필요합니다.');
   if (submitted.length > MAX_MATERIALS_PER_LECTURE) {
     throw new Error(`자료는 최대 ${MAX_MATERIALS_PER_LECTURE}개까지 등록할 수 있습니다.`);
   }
 
-  const filesByField = new Map(files.map((f) => [f.fieldname, f]));
   const finalMaterials = [];
   for (const m of submitted) {
     if (!m || typeof m !== 'object') throw new Error('자료 항목이 올바르지 않습니다.');
@@ -115,25 +87,19 @@ async function assembleMaterials(materialsJson, files) {
       if (!value) throw new Error(`"${label}"의 URL이 비어있습니다.`);
       finalMaterials.push({ kind: 'url', label, value });
     } else if (m.kind === 'file') {
-      if (m.keep && m.value && m.storagePath) {
-        finalMaterials.push({
-          kind: 'file', label,
-          value: m.value,
-          storagePath: m.storagePath,
-          originalFilename: m.originalFilename || null,
-        });
-      } else {
-        const key = String(m.fileKey || '');
-        const file = filesByField.get(key);
-        if (!file) throw new Error(`"${label}"에 첨부할 파일이 누락되었습니다.`);
-        const { storagePath, publicUrl } = await uploadFile(file);
-        finalMaterials.push({
-          kind: 'file', label,
-          value: publicUrl,
-          storagePath,
-          originalFilename: file.originalname,
-        });
+      const storagePath = String(m.storagePath || '');
+      const originalFilename = String(m.originalFilename || '');
+      if (!storagePath) throw new Error(`"${label}"에 업로드된 파일 정보가 없습니다.`);
+      if (!originalFilename) throw new Error(`"${label}"의 원본 파일명이 없습니다.`);
+      if (!ALLOWED_EXT.test(originalFilename)) {
+        throw new Error(`"${label}"은(는) 지원하지 않는 형식입니다. (HTML/PPT/PPTX만)`);
       }
+      finalMaterials.push({
+        kind: 'file', label,
+        value: publicUrlFor(originalFilename, storagePath),
+        storagePath,
+        originalFilename,
+      });
     } else {
       throw new Error('자료 종류(kind)는 url 또는 file 이어야 합니다.');
     }
@@ -160,6 +126,30 @@ app.get('/api/f/:path(*)', async (req, res, next) => {
 
     const buf = Buffer.from(await data.arrayBuffer());
     res.status(200).send(buf);
+  } catch (err) { next(err); }
+});
+
+// Issue a signed upload URL so the browser can PUT the file directly to Supabase.
+// This bypasses Vercel Functions' 4.5MB request body limit.
+app.post('/api/upload-url', requireAuth, async (req, res, next) => {
+  try {
+    const filename = String(req.body?.filename || '').trim();
+    if (!filename || !ALLOWED_EXT.test(filename)) {
+      return res.status(400).json({ error: 'HTML/PPT/PPTX 파일만 업로드할 수 있습니다.' });
+    }
+    const ext = (path.extname(filename) || '').toLowerCase();
+    const stem = crypto.randomBytes(8).toString('hex');
+    const storagePath = `${Date.now()}-${stem}${ext}`;
+    const { data, error } = await supabase.storage
+      .from(UPLOADS_BUCKET)
+      .createSignedUploadUrl(storagePath);
+    if (error) throw new Error('업로드 URL 발급 실패: ' + error.message);
+    res.json({
+      storagePath,
+      signedUrl: data.signedUrl,
+      token: data.token,
+      contentType: CONTENT_TYPE_BY_EXT[ext] || 'application/octet-stream',
+    });
   } catch (err) { next(err); }
 });
 
@@ -205,7 +195,7 @@ app.get('/api/lectures/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-app.post('/api/lectures', requireAuth, upload.any(), async (req, res, next) => {
+app.post('/api/lectures', requireAuth, async (req, res, next) => {
   try {
     const { section, date, title, materials } = req.body;
     if (!section || !date || !title) {
@@ -217,9 +207,9 @@ app.post('/api/lectures', requireAuth, upload.any(), async (req, res, next) => {
       : null;
     if (!sectionsToInsert) return res.status(400).json({ error: '분반 값이 올바르지 않습니다.' });
 
-    const finalMaterials = await assembleMaterials(materials, req.files || []);
+    const finalMaterials = assembleMaterials(materials);
     const rows = sectionsToInsert.map((sec) => ({
-      section: sec, date, title: title.trim(), materials: finalMaterials,
+      section: sec, date, title: String(title).trim(), materials: finalMaterials,
     }));
     const { data, error } = await supabase.from(LECTURES_TABLE)
       .insert(rows)
@@ -230,7 +220,7 @@ app.post('/api/lectures', requireAuth, upload.any(), async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-app.put('/api/lectures/:id', requireAuth, upload.any(), async (req, res, next) => {
+app.put('/api/lectures/:id', requireAuth, async (req, res, next) => {
   try {
     const id = Number(req.params.id);
     const { data: existing, error: e0 } = await supabase.from(LECTURES_TABLE)
@@ -246,7 +236,7 @@ app.put('/api/lectures/:id', requireAuth, upload.any(), async (req, res, next) =
       return res.status(400).json({ error: '분반 값이 올바르지 않습니다. (수정 시 개별 분반만 지정 가능)' });
     }
 
-    const finalMaterials = await assembleMaterials(materials, req.files || []);
+    const finalMaterials = assembleMaterials(materials);
     const oldMaterials = Array.isArray(existing.materials) ? existing.materials : [];
     const keptPaths = new Set(finalMaterials.filter((m) => m.kind === 'file').map((m) => m.storagePath));
     const orphaned = oldMaterials.filter((m) => m.kind === 'file' && m.storagePath && !keptPaths.has(m.storagePath));
@@ -254,7 +244,7 @@ app.put('/api/lectures/:id', requireAuth, upload.any(), async (req, res, next) =
     await deleteUnreferencedFiles(orphaned, otherRefs);
 
     const { data, error } = await supabase.from(LECTURES_TABLE)
-      .update({ section, date, title: title.trim(), materials: finalMaterials })
+      .update({ section, date, title: String(title).trim(), materials: finalMaterials })
       .eq('id', id)
       .select('id, section, date, title, materials, created_at')
       .maybeSingle();

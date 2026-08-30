@@ -26,6 +26,7 @@ export default function AdminDashboard() {
   const [error, setError] = useState('');
   const [ok, setOk] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [progress, setProgress] = useState(null);
 
   const [q, setQ] = useState('');
   const [from, setFrom] = useState('');
@@ -59,7 +60,7 @@ export default function AdminDashboard() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    setError(''); setOk(''); setSubmitting(true);
+    setError(''); setOk(''); setSubmitting(true); setProgress(null);
     try {
       if (form.materials.length === 0) throw new Error('최소 하나의 자료를 추가하세요.');
       for (const [i, m] of form.materials.entries()) {
@@ -67,11 +68,12 @@ export default function AdminDashboard() {
         if (m.kind === 'url' && !m.value.trim()) throw new Error(`${i + 1}번째 자료의 URL을 입력하세요.`);
         if (m.kind === 'file' && !m.file && !m.value) throw new Error(`${i + 1}번째 자료의 파일을 선택하세요.`);
       }
+      const onProgress = (info) => setProgress(info);
       if (editingId) {
-        await updateLecture(editingId, form);
+        await updateLecture(editingId, form, onProgress);
         setOk('강의를 수정했습니다.');
       } else {
-        await createLecture(form);
+        await createLecture(form, onProgress);
         setOk('강의를 등록했습니다.');
       }
       resetForm();
@@ -80,6 +82,7 @@ export default function AdminDashboard() {
       setError(err.message);
     } finally {
       setSubmitting(false);
+      setProgress(null);
     }
   };
 
@@ -213,6 +216,16 @@ export default function AdminDashboard() {
                 ))}
               </div>
 
+              {progress && (
+                <div className="upload-progress">
+                  <div className="upload-progress-label">
+                    업로드 중: {progress.filename} ({Math.round((progress.progress || 0) * 100)}%)
+                  </div>
+                  <div className="upload-progress-track">
+                    <div className="upload-progress-fill" style={{ width: `${Math.round((progress.progress || 0) * 100)}%` }} />
+                  </div>
+                </div>
+              )}
               <div style={{ display: 'flex', gap: 8, marginTop: 20 }}>
                 <button className="btn btn-primary" type="submit" disabled={submitting}>
                   {submitting ? '처리 중...' : editingId ? '수정 저장' : '강의 등록'}

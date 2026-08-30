@@ -14,8 +14,16 @@ async function handle(res) {
     throw new Error('세션이 만료되었습니다. 다시 로그인해 주세요.');
   }
   if (!res.ok) {
-    let msg = '요청 실패';
-    try { const d = await res.json(); if (d?.error) msg = d.error; } catch (_e) { /* ignore */ }
+    let msg = `요청 실패 (${res.status})`;
+    try {
+      const d = await res.json();
+      if (d?.error) msg = d.error;
+    } catch (_e) {
+      try {
+        const text = await res.text();
+        if (text) msg = `요청 실패 (${res.status}): ${text.slice(0, 200)}`;
+      } catch (_e2) { /* ignore */ }
+    }
     throw new Error(msg);
   }
   return res.json();
@@ -57,46 +65,81 @@ export async function fetchLecture(id) {
   return handle(res);
 }
 
-// materials: array of { kind:'url', label, value } | { kind:'file', label, file?:File, keep?:boolean, value?, originalFilename? }
-function buildFormData({ section, date, title, materials }) {
-  const fd = new FormData();
-  fd.append('section', section);
-  fd.append('date', date);
-  fd.append('title', title);
+// Request a signed upload URL from the server, then PUT the file directly to
+// Supabase Storage. Returns the storagePath that identifies the uploaded object.
+async function uploadFileDirect(file, onProgress) {
+  const meta = await handle(await fetch('/api/upload-url', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ filename: file.name }),
+  }));
 
-  const clientMaterials = materials.map((m, idx) => {
-    if (m.kind === 'url') {
-      return { kind: 'url', label: m.label, value: m.value };
-    }
-    if (m.file) {
-      const fileKey = `file_${idx}`;
-      fd.append(fileKey, m.file);
-      return { kind: 'file', label: m.label, fileKey };
-    }
-    // existing file kept as-is (edit case)
-    return {
-      kind: 'file', label: m.label, keep: true,
-      value: m.value, originalFilename: m.originalFilename || null,
+  // Use XHR so we can report progress (fetch doesn't natively support upload progress).
+  await new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', meta.signedUrl);
+    xhr.setRequestHeader('Content-Type', meta.contentType);
+    xhr.upload.onprogress = (e) => {
+      if (onProgress && e.lengthComputable) onProgress(e.loaded / e.total);
     };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`Supabase 업로드 실패 (${xhr.status}): ${xhr.responseText?.slice(0, 200) || ''}`));
+    };
+    xhr.onerror = () => reject(new Error('네트워크 오류로 업로드가 중단되었습니다.'));
+    xhr.send(file);
   });
-  fd.append('materials', JSON.stringify(clientMaterials));
-  return fd;
+
+  return { storagePath: meta.storagePath, originalFilename: file.name };
 }
 
-export async function createLecture(payload) {
+// materials: array of client-side items:
+//   { kind:'url', label, value }
+//   { kind:'file', label, file:File }            (new file)
+//   { kind:'file', label, keep:true, storagePath, value, originalFilename }  (edit-preserving)
+async function buildRequestBody({ section, date, title, materials }, onProgress) {
+  const final = [];
+  const total = materials.filter((m) => m.file).length;
+  let done = 0;
+  for (const m of materials) {
+    if (m.kind === 'url') {
+      final.push({ kind: 'url', label: m.label, value: m.value });
+    } else if (m.kind === 'file') {
+      if (m.file) {
+        const { storagePath, originalFilename } = await uploadFileDirect(m.file, (p) => {
+          if (onProgress) onProgress({ index: done, filename: m.file.name, progress: p });
+        });
+        done++;
+        if (onProgress) onProgress({ index: done, filename: m.file.name, progress: 1, done, total });
+        final.push({ kind: 'file', label: m.label, storagePath, originalFilename });
+      } else {
+        final.push({
+          kind: 'file', label: m.label, keep: true,
+          storagePath: m.storagePath, value: m.value,
+          originalFilename: m.originalFilename || null,
+        });
+      }
+    }
+  }
+  return { section, date, title, materials: final };
+}
+
+export async function createLecture(payload, onProgress) {
+  const body = await buildRequestBody(payload, onProgress);
   const res = await fetch('/api/lectures', {
     method: 'POST',
-    headers: { ...authHeaders() },
-    body: buildFormData(payload),
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
   });
   return handle(res);
 }
 
-export async function updateLecture(id, payload) {
+export async function updateLecture(id, payload, onProgress) {
+  const body = await buildRequestBody(payload, onProgress);
   const res = await fetch(`/api/lectures/${id}`, {
     method: 'PUT',
-    headers: { ...authHeaders() },
-    body: buildFormData(payload),
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
   });
   return handle(res);
 }
