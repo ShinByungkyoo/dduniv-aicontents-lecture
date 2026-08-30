@@ -9,10 +9,17 @@ function formatDate(iso) {
   return d.toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
 }
 
+function kindLabel(m) {
+  if (m.kind === 'url') return 'URL';
+  const name = m.originalFilename || m.value || '';
+  if (/\.pptx?$/i.test(name)) return 'PPT';
+  if (/\.html?$/i.test(name)) return 'HTML';
+  return '파일';
+}
+
 export default function LectureDetail() {
   const { id } = useParams();
   const [lecture, setLecture] = useState(null);
-  const [activeIdx, setActiveIdx] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -20,7 +27,7 @@ export default function LectureDetail() {
     let cancelled = false;
     setLoading(true); setError('');
     fetchLecture(id)
-      .then((row) => { if (!cancelled) { setLecture(row); setActiveIdx(0); } })
+      .then((row) => { if (!cancelled) setLecture(row); })
       .catch((e) => { if (!cancelled) setError(e.message); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
@@ -31,7 +38,6 @@ export default function LectureDetail() {
   if (!lecture) return null;
 
   const materials = lecture.materials || [];
-  const active = materials[activeIdx];
 
   return (
     <>
@@ -50,38 +56,28 @@ export default function LectureDetail() {
         {materials.length === 0 ? (
           <div className="info-banner">등록된 자료가 없습니다.</div>
         ) : (
-          <div className="detail-layout">
-            <aside className="material-list">
-              <h3 className="card-title">자료 목록 ({materials.length}건)</h3>
+          <section className="card">
+            <h2 className="card-title">자료 목록 ({materials.length}건)</h2>
+            <ul className="material-open-list">
               {materials.map((m, idx) => (
-                <button
-                  key={idx}
-                  className={'material-item ' + (idx === activeIdx ? 'active' : '')}
-                  onClick={() => setActiveIdx(idx)}
-                >
-                  <span className={'tag ' + (m.kind === 'file' ? '' : 'tag-neutral')}>
-                    {m.kind === 'file' ? '파일' : 'URL'}
-                  </span>
-                  <span className="material-label">{m.label}</span>
-                </button>
+                <li key={idx} className="material-open-item">
+                  <span className={'tag ' + (m.kind === 'file' ? '' : 'tag-neutral')}>{kindLabel(m)}</span>
+                  <div className="material-open-info">
+                    <div className="material-open-label">{m.label}</div>
+                    {m.originalFilename && (
+                      <div className="material-open-filename">{m.originalFilename}</div>
+                    )}
+                  </div>
+                  <a
+                    href={m.value}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="btn btn-primary"
+                  >열기 ↗</a>
+                </li>
               ))}
-            </aside>
-            <section className="material-viewer">
-              <div className="material-toolbar">
-                <span className="material-title">{active.label}</span>
-                <a href={active.value} target="_blank" rel="noreferrer" className="btn btn-outline" style={{ padding: '6px 14px', fontSize: 13 }}>
-                  새 창에서 열기 ↗
-                </a>
-              </div>
-              <iframe
-                key={active.value}
-                title={active.label}
-                src={active.value}
-                className="material-iframe"
-                sandbox="allow-scripts allow-same-origin allow-popups allow-forms"
-              />
-            </section>
-          </div>
+            </ul>
+          </section>
         )}
       </main>
     </>

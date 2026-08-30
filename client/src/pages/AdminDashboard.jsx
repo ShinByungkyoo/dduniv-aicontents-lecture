@@ -201,9 +201,11 @@ export default function AdminDashboard() {
                           </div>
                         )}
                         <input
-                          type="file" accept=".html,.htm,text/html"
+                          type="file"
+                          accept=".html,.htm,.ppt,.pptx"
                           onChange={(e) => setMaterial(idx, { file: e.target.files?.[0] || null })}
                         />
+                        <div className="hint" style={{ marginTop: 4 }}>HTML / PPT / PPTX · 최대 30MB</div>
                         {m.file && <div className="filename">선택됨: {m.file.name}</div>}
                       </div>
                     )}

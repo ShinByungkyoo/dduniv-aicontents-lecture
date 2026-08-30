@@ -614,6 +614,33 @@ input, select, textarea {
   white-space: nowrap;
 }
 
+/* Detail page material list (open-in-new-tab style) */
+.material-open-list { list-style: none; padding: 0; margin: 0; }
+.material-open-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 14px;
+  border: 1px solid var(--dd-line);
+  border-radius: 2px;
+  margin-bottom: 10px;
+  background: #fff;
+}
+.material-open-item:hover { border-color: var(--dd-primary); }
+.material-open-info { flex: 1; min-width: 0; }
+.material-open-label {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--dd-ink);
+  margin-bottom: 2px;
+  word-break: break-word;
+}
+.material-open-filename {
+  font-size: 12px;
+  color: var(--dd-muted);
+  word-break: break-all;
+}
+
 .material-viewer {
   border: 1px solid var(--dd-line);
   background: #fff;

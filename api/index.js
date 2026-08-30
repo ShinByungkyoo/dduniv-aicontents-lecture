@@ -7,7 +7,17 @@ import { supabase, LECTURES_TABLE, UPLOADS_BUCKET } from '../lib/supabase.js';
 import { issueToken, checkCredentials, requireAuth, verifyToken } from '../lib/auth.js';
 
 const MAX_MATERIALS_PER_LECTURE = 10;
+const MAX_FILE_BYTES = 30 * 1024 * 1024;
 const VALID_SECTIONS = ['1분반', '2분반'];
+
+const ALLOWED_EXT = /\.(html?|pptx?)$/i;
+const CONTENT_TYPE_BY_EXT = {
+  '.html': 'text/html; charset=utf-8',
+  '.htm':  'text/html; charset=utf-8',
+  '.ppt':  'application/vnd.ms-powerpoint',
+  '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+};
+const isHtml = (name) => /\.html?$/i.test(name);
 
 const app = express();
 app.use(cors());
@@ -15,10 +25,11 @@ app.use(express.json());
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024, files: MAX_MATERIALS_PER_LECTURE },
+  limits: { fileSize: MAX_FILE_BYTES, files: MAX_MATERIALS_PER_LECTURE },
   fileFilter: (_req, file, cb) => {
-    const ok = /\.html?$/i.test(file.originalname) || file.mimetype === 'text/html';
-    if (!ok) return cb(new Error('HTML 파일만 업로드할 수 있습니다.'));
+    if (!ALLOWED_EXT.test(file.originalname)) {
+      return cb(new Error('HTML 또는 PPT/PPTX 파일만 업로드할 수 있습니다.'));
+    }
     cb(null, true);
   },
 });
@@ -61,26 +72,25 @@ async function deleteUnreferencedFiles(materials, referenced) {
 }
 
 async function uploadFile(file) {
-  const ext = path.extname(file.originalname) || '.html';
+  const ext = (path.extname(file.originalname) || '').toLowerCase();
   const stem = crypto.randomBytes(8).toString('hex');
   const objectPath = `${Date.now()}-${stem}${ext}`;
 
-  const isHtml = /\.html?$/i.test(file.originalname);
-  const contentType = isHtml
-    ? 'text/html; charset=utf-8'
-    : (file.mimetype || 'application/octet-stream');
+  const contentType = CONTENT_TYPE_BY_EXT[ext] || file.mimetype || 'application/octet-stream';
 
   const { error } = await supabase.storage
     .from(UPLOADS_BUCKET)
     .upload(objectPath, file.buffer, { contentType, cacheControl: '3600', upsert: false });
   if (error) throw new Error(`업로드 실패: ${error.message}`);
 
-  // Supabase Storage forces user-uploaded HTML to serve as text/plain (XSS mitigation).
-  // We proxy through our own /api/f/... endpoint so we control the Content-Type.
-  return {
-    storagePath: objectPath,
-    publicUrl: `/api/f/${encodeURIComponent(objectPath)}`,
-  };
+  // Supabase Storage forces user-uploaded HTML to serve as text/plain (XSS mitigation),
+  // so HTML must be proxied through /api/f/... Other formats (PPT/PPTX) are served
+  // directly from Supabase since Supabase honors their Content-Type correctly.
+  const publicUrl = isHtml(file.originalname)
+    ? `/api/f/${encodeURIComponent(objectPath)}`
+    : supabase.storage.from(UPLOADS_BUCKET).getPublicUrl(objectPath).data.publicUrl;
+
+  return { storagePath: objectPath, publicUrl };
 }
 
 async function assembleMaterials(materialsJson, files) {
@@ -143,8 +153,8 @@ app.get('/api/f/:path(*)', async (req, res, next) => {
     const { data, error } = await supabase.storage.from(UPLOADS_BUCKET).download(objectPath);
     if (error || !data) return res.status(404).json({ error: '파일을 찾을 수 없습니다.' });
 
-    const isHtml = /\.html?$/i.test(objectPath);
-    res.setHeader('Content-Type', isHtml ? 'text/html; charset=utf-8' : 'application/octet-stream');
+    const ext = (path.extname(objectPath) || '').toLowerCase();
+    res.setHeader('Content-Type', CONTENT_TYPE_BY_EXT[ext] || 'application/octet-stream');
     res.setHeader('Cache-Control', 'public, max-age=3600');
     res.setHeader('X-Content-Type-Options', 'nosniff');
 

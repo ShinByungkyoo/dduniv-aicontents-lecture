@@ -60,11 +60,16 @@ if (exists) {
 } else {
   const { error: createErr } = await supabase.storage.createBucket('lecture-uploads', {
     public: true,
-    fileSizeLimit: 52428800,   // 50 MB
-    allowedMimeTypes: ['text/html'],
+    fileSizeLimit: 31457280,   // 30 MB
+    allowedMimeTypes: [
+      'text/html',
+      'text/html; charset=utf-8',
+      'application/vnd.ms-powerpoint',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    ],
   });
   if (createErr) { console.error('createBucket failed:', createErr.message); process.exit(1); }
-  console.log('      ✓ bucket created (public, 50 MB, text/html only)');
+  console.log('      ✓ bucket created (public, 30 MB, HTML + PPT)');
 }
 
 console.log('\nDone. Supabase is ready.');
