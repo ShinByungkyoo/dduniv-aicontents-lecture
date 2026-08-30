@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "install:all": "npm install && npm install --prefix client",
-    "dev:api": "node --watch --env-file-if-exists=.env dev-server.js",
+    "dev:api": "node --watch --env-file-if-exists=.env.local dev-server.js",
     "dev:client": "npm run dev --prefix client",
     "dev": "concurrently -k -n api,client -c green,cyan \"npm run dev:api\" \"npm run dev:client\"",
     "build": "npm run build --prefix client"
@@ -17,6 +17,7 @@
     "multer": "^1.4.5-lts.1"
   },
   "devDependencies": {
-    "concurrently": "^9.1.0"
+    "concurrently": "^9.1.0",
+    "pg": "^8.23.0"
   }
 }
