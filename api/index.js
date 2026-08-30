@@ -65,10 +65,6 @@ async function uploadFile(file) {
   const stem = crypto.randomBytes(8).toString('hex');
   const objectPath = `${Date.now()}-${stem}${ext}`;
 
-  // Always serve HTML with the correct MIME + charset so the browser renders it
-  // instead of displaying the source as text. Browsers submit .html uploads with a
-  // variety of MIME types (text/plain, application/octet-stream, text/html), so we
-  // ignore file.mimetype for .html/.htm and force the right one.
   const isHtml = /\.html?$/i.test(file.originalname);
   const contentType = isHtml
     ? 'text/html; charset=utf-8'
@@ -78,8 +74,13 @@ async function uploadFile(file) {
     .from(UPLOADS_BUCKET)
     .upload(objectPath, file.buffer, { contentType, cacheControl: '3600', upsert: false });
   if (error) throw new Error(`업로드 실패: ${error.message}`);
-  const { data } = supabase.storage.from(UPLOADS_BUCKET).getPublicUrl(objectPath);
-  return { storagePath: objectPath, publicUrl: data.publicUrl };
+
+  // Supabase Storage forces user-uploaded HTML to serve as text/plain (XSS mitigation).
+  // We proxy through our own /api/f/... endpoint so we control the Content-Type.
+  return {
+    storagePath: objectPath,
+    publicUrl: `/api/f/${encodeURIComponent(objectPath)}`,
+  };
 }
 
 async function assembleMaterials(materialsJson, files) {
@@ -129,6 +130,28 @@ async function assembleMaterials(materialsJson, files) {
   }
   return finalMaterials;
 }
+
+// Serve user-uploaded HTML with the correct Content-Type. We proxy from Supabase
+// Storage because Supabase itself refuses to serve user HTML as text/html (XSS
+// mitigation) and always returns text/plain.
+app.get('/api/f/:path(*)', async (req, res, next) => {
+  try {
+    const objectPath = decodeURIComponent(req.params.path || '');
+    if (!objectPath || objectPath.includes('..')) {
+      return res.status(400).json({ error: '잘못된 경로입니다.' });
+    }
+    const { data, error } = await supabase.storage.from(UPLOADS_BUCKET).download(objectPath);
+    if (error || !data) return res.status(404).json({ error: '파일을 찾을 수 없습니다.' });
+
+    const isHtml = /\.html?$/i.test(objectPath);
+    res.setHeader('Content-Type', isHtml ? 'text/html; charset=utf-8' : 'application/octet-stream');
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+
+    const buf = Buffer.from(await data.arrayBuffer());
+    res.status(200).send(buf);
+  } catch (err) { next(err); }
+});
 
 app.post('/api/login', (req, res) => {
   const { id, pw } = req.body || {};
